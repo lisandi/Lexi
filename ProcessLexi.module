@@ -1,0 +1,91 @@
+<?php
+
+class ProcessLexi extends Process implements Module {
+
+    const PERMISSION_VIEW = 'lexi-view';
+    const PERMISSION_EDIT = 'lexi-edit';
+    const PERMISSION_EDIT_KEYS = 'lexi-edit-keys';
+    const PAGE_NAME = 'lexi';
+
+
+
+    public function __construct() { }
+
+
+    /** PUBLIC METHODS */
+
+
+    public static function getModuleInfo() {
+        return array(
+            'title' => __('ProcessLexi', __FILE__),
+            'summary' => __('A Process module to help manage your lexi translations.', __FILE__),
+            'author' => 'Wanze',
+            'version' => 100,
+            'href' => '',
+            'permanent' => false,
+            'permission' => self::PERMISSION_VIEW,
+        );
+    }
+
+    public function ___install() {
+        $page = $this->pages->get('template=admin, name='.self::PAGE_NAME);
+        if (!$page->id) {
+            $page = new Page();
+            $page->template = 'admin';
+            $page->parent = $this->pages->get($this->config->adminRootPageID)->child('name=setup');
+            $page->title = 'Lexi';
+            $page->name = self::PAGE_NAME;
+            $page->process = $this;
+            $page->save();
+        }
+    }
+
+    /**
+     * The main execute method shows a list of the available topics
+     *
+     * @return html
+     */
+    public function ___execute() {
+        return $this->renderTopicsTable();
+    }
+
+
+    public function ___executeTopic() {
+
+    }
+
+
+
+    /** PROTECTED */
+
+    protected function ___renderTopicsTable() {
+        /** @var MarkupAdminDataTable $table */
+        $table = $this->modules->get('MarkupAdminDataTable');
+        $topics = $this->lexi->getTopics();
+        $headerRow = array('Title', 'Description', 'Identifier', 'Actions');
+        $table->headerRow($headerRow);
+        $table->setEncodeEntities(false);
+        foreach ($topics as $topic) {
+            $row = array(
+                $topic->title,
+                $topic->description,
+                $topic->identifier,
+                '<a href="#">Manage translations</a> | <a href="">Edit</a>',
+            );
+            $table->row($row);
+        }
+        return $table->render();
+    }
+
+
+    protected function ___hasPermissionToEditTranslations() {
+        return $this->user->hasPermission(self::PERMISSION_EDIT);
+    }
+
+    protected function ___hasPermissionToEditTranslationKeys() {
+        return $this->user->hasPermission(self::PERMISSION_EDIT_KEYS);
+    }
+
+
+
+}

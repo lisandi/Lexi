@@ -1,0 +1,296 @@
+<?php
+
+require_once(dirname(__FILE__) . DIRECTORY_SEPARATOR . 'LexiTopic.class.php');
+
+class Lexi extends Wire implements Module, ConfigurableModule {
+
+    const DB_NAME_TOPICS = 'lexi_topics';
+    const DB_NAME_TRANSLATIONS = 'lexi_translations';
+    const DB_SCHEMA_VERSION = 1;
+
+    /**
+     * @var array Default module configuration
+     */
+    protected static $defaultConfig = array(
+        'db_schema_version' => 1,
+    );
+
+    /**
+     * @var array Contains the loaded topics
+     */
+    protected static $topics = array();
+
+
+    public function __construct() {
+//        foreach (self::$defaultConfig as $k => $v) {
+//            $this->setConfig($k, $v);
+//        }
+        $this->setTrackChanges(true);
+    }
+
+
+    /** PUBLIC METHODS */
+
+
+    public static function getModuleInfo() {
+        return array(
+             'title' => __('Lexi'),
+             'version' => 100,
+             'author' => 'Wanze',
+             'summary' => __('Key based translation strings management.'),
+             'href' => '',
+             'singular' => true,
+             'autoload' => true,
+             'installs' => array('ProcessLexi'),
+         );
+    }
+
+    /**
+     * Provide API variable for this class and init Hooks
+     */
+    public function init() {
+        $this->wire('lexi', $this);
+        $this->languages->addHookAfter('added', $this, 'addLanguage');
+        $this->languages->addHookAfter('deleted', $this, 'deleteLanguage');
+    }
+
+    /**
+     * Install module by creating the needed database tables
+     * Also create default topic
+     */
+    public function ___install() {
+        $sql = "CREATE TABLE `" . self::DB_NAME_TOPICS . "` (
+                `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
+                `title` varchar(255) NOT NULL DEFAULT '',
+                `identifier` varchar(255) NOT NULL DEFAULT '',
+                `description` text,
+                PRIMARY KEY (`id`),
+                UNIQUE KEY `identifier` (`identifier`)) ENGINE=MyISAM
+                DEFAULT CHARSET=utf8;";
+        if ($this->createDB($sql)) $this->message("Created table " . self::DB_NAME_TOPICS);
+
+        $sql = "CREATE TABLE `" . self::DB_NAME_TRANSLATIONS . "` (
+                `topic_id` int(11) NOT NULL,
+                `lang_id` int(11) NOT NULL,
+                `translations` text,
+                UNIQUE KEY `topic_id` (`topic_id`,`lang_id`)
+                ) ENGINE=MyISAM DEFAULT CHARSET=utf8;";
+        if ($this->createDB($sql)) $this->message("Created table " . self::DB_NAME_TRANSLATIONS);
+
+        $topic = new LexiTopic();
+        $topic->setIdentifier(LexiTopic::DEFAULT_TOPIC_IDENTIFIER);
+        $topic->setTitle('Default topic');
+        $topic->setDescription('This is the default topic, change the title or description according to your needs');
+        $topic->save();
+    }
+
+    /**
+     * Uninstall module by removing the tables
+     */
+    public function ___uninstall() {
+        $this->database->exec("DROP TABLE `" . self::DB_NAME_TOPICS . "`");
+        $this->database->exec("DROP TABLE `" . self::DB_NAME_TRANSLATIONS . "`");
+    }
+
+    /**
+     * Return an InputfieldWrapper of Inputfields used to configure the class
+     *
+     * @param array $data Array of config values indexed by field name
+     * @return InputfieldWrapper
+     */
+    public static function getModuleConfigInputfields(array $data) {
+        // Nothing to configure yet...just the schema version, but that's not visible for the user
+        return new InputfieldWrapper();
+    }
+
+    /**
+     * Get a translation
+     * If you specify a key only, it will be loaded from the default topic, e.g. $lexi->get("myKey");
+     * Specify a topic and a key to load a translation from another topic, separated with a dot: $lexi->get("myTopic.myKey");
+     * Optionally set a language object/name/id to load the translation from a language, default is language assigned to current user.
+
+     * @param string $key Key of a translation or topic/key pair
+     * @param mixed $language Instance of Language|id|name
+     * @return string
+     */
+    public function get($key, $language=null) {
+        list ($identifier, $key) = $this->getTopicIdentifierAndKey($key);
+        $langId = $this->getLangId($language);
+        /** @var LexiTopic $lexiTopic */
+        $lexiTopic = self::getTopic($identifier);
+        return $lexiTopic->getTranslation($key, $langId);
+    }
+
+    /**
+     * Set a translation
+     * After setting translations, make sure you call Lexi::save() method to save changes in database.
+     *
+     * Example of creating or updating a translation key via API:
+     * $lexi = wire('lexi');
+     * $lexi->set('myTopic.myKey', 'ProcessWire is awesome!');
+     * $lexi->set('myTopic.myKey', 'ProcessWire ist genial!', 'de');
+     * $lexi->save();
+     *
+     * @param string $key Key of a translation or topic/key pair
+     * @param string $value Translation value
+     * @param mixed $language Instance of Language|id|name
+     * @return void
+     */
+    public function set($key, $value, $language=null) {
+        list ($identifier, $key) = $this->getTopicIdentifierAndKey($key);
+        $langId = $this->getLangId($language);
+        /** @var LexiTopic $lexiTopic */
+        $lexiTopic = self::getTopic($identifier);
+        $lexiTopic->setTranslation($key, $value, $langId);
+        $this->trackChange($identifier);
+    }
+
+    /**
+     * Delete a key from a topic. Note that the key will be deleted for ALL languages
+     *
+     * Example:
+     * $lexi = wire('lexi');
+     * $lexi->delete("myTopic.myKey");
+     * $lexi->save();
+     *
+     * @param $key
+     */
+    public function delete($key) {
+        list ($identifier, $key) = $this->getTopicIdentifierAndKey($key);
+        $lexiTopic = self::getTopic($identifier);
+        $lexiTopic->unsetKey($key);
+        $this->trackChange($identifier);
+    }
+
+    /**
+     * Save all changed topics to database
+     */
+    public function save() {
+        foreach ($this->getChanges() as $identifier) {
+            /** @var LexiTopic $lexiTopic */
+            $lexiTopic = self::$topics[$identifier];
+            $lexiTopic->save();
+        }
+        $this->resetTrackChanges();
+    }
+
+
+    /**
+     * Get all topics
+     *
+     * @return array LexiTopic[]
+     */
+    public function getTopics() {
+        $topics = array();
+        $sth = $this->database->prepare('SELECT * FROM ' . self::DB_NAME_TOPICS . ' ORDER BY title');
+        $sth->execute();
+        while ($row = $sth->fetch(PDO::FETCH_OBJ)) {
+            $lexiTopic = LexiTopic::getTopicById($row->id);
+            $topics[] = $lexiTopic;
+            self::$topics[$lexiTopic->getIdentifier()] = $lexiTopic;
+        }
+        return $topics;
+    }
+
+
+    /** HOOKS */
+
+
+    /**
+     * If a language is added to ProcessWire, create empty entries for module
+     * This makes it easier for the LexiTopic class since there are only UPDATES, no INSERTS
+     *
+     * @param HookEvent $event
+     */
+    public function addLanguage(HookEvent $event) {
+        $langPage = $event->arguments('language');
+        $sthSelect = $this->database->prepare('SELECT * FROM ' . self::DB_NAME_TOPICS);
+        $sthSelect->execute();
+        $sql = 'INSERT INTO ' . self::DB_NAME_TRANSLATIONS . ' (topic_id, lang_id) VALUES (:topic_id, :lang_id)';
+        $sthInsert = $this->database->prepare($sql);
+        while ($row = $sthSelect->fetch()) {
+            $sthInsert->execute(array('topic_id' => $row['id'], 'lang_id' => $langPage->id));
+        }
+    }
+
+    /**
+     * If a language is deleted from ProcessWire, delete entries of this module
+     *
+     * @param HookEvent $event
+     */
+    public function deleteLanguage(HookEvent $event) {
+        $langPage = $event->arguments('language');
+        $sth = $this->database->prepare('DELETE FROM ' . self::DB_NAME_TRANSLATIONS . 'WHERE lang_id = :id');
+        $sth->execute(array('id' => $langPage->id));
+    }
+
+    public function __set($key, $value) {
+        parent::__set($key, $value);
+    }
+
+
+
+    /** PROTECTED METHODS */
+
+
+    /**
+     * Get a LexiTopic object, either from cache. If not in cache, add it
+     *
+     * @param string $identifier Identifier of a topic
+     * @return LexiTopic
+     */
+    protected static function getTopic($identifier) {
+        if (!isset(self::$topics[$identifier])) {
+            self::$topics[$identifier] = LexiTopic::getTopicByIdentifier($identifier);
+        }
+        return self::$topics[$identifier];
+    }
+
+
+    /**
+     * Get topic identifier and key from a string with syntax "topic.key" or "key"
+     *
+     * @param $str
+     * @return array 1st pos: identifier, 2nd pos: key
+     */
+    protected function getTopicIdentifierAndKey($str) {
+        $identifier = LexiTopic::DEFAULT_TOPIC_IDENTIFIER;
+        $key = $str;
+        if (strpos($str, '.') !== false) list ($identifier, $key) = explode('.', $str);
+        return array($identifier, $key);
+    }
+
+//    protected function getConfig($key) {
+//        return (isset($this->data[$key])) ? $this->data[$key] : null;
+//    }
+//
+//    protected function setConfig($key, $value) {
+//        $this->data[$key] = $value;
+//    }
+
+    protected function createDB($sql) {
+        try {
+            $this->database->exec($sql);
+            return true;
+        } catch(Exception $e) {
+            $this->error($e->getMessage(), Notice::log);
+            return false;
+        }
+    }
+
+    /**
+     * Helper function to return language page ID of unknown/mixed variable
+     * @param $language
+     * @return int
+     */
+    protected function getLangId($language) {
+        $langId = 0;
+        if (!is_null($language)) {
+            if ($language instanceof Language) $langId = $language->id;
+            if (is_string($language)) $langId = $this->languages->get($language)->id;
+        } else {
+            $langId = $this->user->language->id;
+        }
+        return $langId;
+    }
+}
